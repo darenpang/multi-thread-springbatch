@@ -1,0 +1,19 @@
+spring:
+  application:
+    name: sample
+
+  datasource:
+    url: jdbc:postgresql://192.168.50.211:15432/springbatch
+    username: batchuser
+    password: P@ssword
+    driver-class-name: org.postgresql.Driver
+
+mybatis:
+  mapper-locations: classpath*:mapper/*.xml
+
+app:
+  batch:
+    user-import:
+      file-path: src/test/resources/data.csv
+      file-encoding: UTF-8
+      chunk-size: 5

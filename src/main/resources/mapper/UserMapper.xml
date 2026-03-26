@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="multi.thread.sample.infrastructure.mybatis.UserMapper">
+
+    <update id="truncateUsers">
+        TRUNCATE TABLE users
+    </update>
+
+    <insert id="insertUsers">
+        INSERT INTO users (btn, koza, name, kbn, ymd)
+        VALUES
+        <foreach collection="users" item="user" separator=",">
+            (
+                #{user.btn, jdbcType=CHAR},
+                #{user.koza, jdbcType=INTEGER},
+                #{user.name, jdbcType=VARCHAR},
+                #{user.kbn, jdbcType=CHAR},
+                #{user.ymd, jdbcType=DATE}
+            )
+        </foreach>
+    </insert>
+
+</mapper>

@@ -8,18 +8,15 @@
         TRUNCATE TABLE users
     </update>
 
-    <insert id="insertUsers">
+    <insert id="insertUser">
         INSERT INTO users (btn, koza, name, kbn, ymd)
-        VALUES
-        <foreach collection="users" item="user" separator=",">
-            (
-                #{user.btn, jdbcType=CHAR},
-                #{user.koza, jdbcType=INTEGER},
-                #{user.name, jdbcType=VARCHAR},
-                #{user.kbn, jdbcType=CHAR},
-                #{user.ymd, jdbcType=DATE}
-            )
-        </foreach>
+        VALUES (
+            #{btn, jdbcType=CHAR},
+            #{koza, jdbcType=INTEGER},
+            #{name, jdbcType=VARCHAR},
+            #{kbn, jdbcType=CHAR},
+            #{ymd, jdbcType=DATE}
+        )
     </insert>
 
 </mapper>

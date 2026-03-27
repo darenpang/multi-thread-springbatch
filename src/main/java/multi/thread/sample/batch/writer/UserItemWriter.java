@@ -21,10 +21,9 @@ public class UserItemWriter implements ItemWriter<UserBatchItem> {
 			return;
 		}
 
-		var users = chunk.getItems().stream()
-				.map(UserBatchItem.class::cast)
-				.toList();
-		userMapper.insertUsers(users);
-		log.info("inserted {} users", users.size());
+		for (var item : chunk.getItems()) {
+			userMapper.insertUser(item);
+		}
+		log.info("queued {} users for batch insert", chunk.size());
 	}
 }

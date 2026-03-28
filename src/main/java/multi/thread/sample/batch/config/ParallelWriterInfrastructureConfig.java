@@ -14,13 +14,13 @@ public class ParallelWriterInfrastructureConfig {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         // 各スレッドの名前のprefix
         executor.setThreadNamePrefix("parallelWriter-");
-        // 常駐スレッド数
+        // 基本となるスレッド数。タスク到着時に必要に応じて生成される
         executor.setCorePoolSize(parallelWriterProperties.getThreadPoolSize());
         // 最大スレッド数
         executor.setMaxPoolSize(parallelWriterProperties.getThreadPoolSize());
-        // キューを0にして、実際の待ちは外のSemaphoreでコントロール
+        // executor 内では待ち行列を持たない。実際の待ちは外のSemaphoreでコントロール
         executor.setQueueCapacity(0);
-        // タスク完了まで待つ
+        // shutdown 時に、すでに受け付けたタスクの完了を待つ
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.initialize();
         return executor;

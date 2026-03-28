@@ -15,9 +15,9 @@ public class ParallelWriterInfrastructureConfig {
         // 各スレッドの名前のprefix
         executor.setThreadNamePrefix("parallelWriter-");
         // 常駐スレッド数
-        executor.setCorePoolSize(parallelWriterProperties.getPoolSize());
+        executor.setCorePoolSize(parallelWriterProperties.getThreadPoolSize());
         // 最大スレッド数
-        executor.setMaxPoolSize(parallelWriterProperties.getPoolSize());
+        executor.setMaxPoolSize(parallelWriterProperties.getThreadPoolSize());
         // キューを0にして、実際の待ちは外のSemaphoreでコントロール
         executor.setQueueCapacity(0);
         // タスク完了まで待つ

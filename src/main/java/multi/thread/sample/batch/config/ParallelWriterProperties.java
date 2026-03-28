@@ -12,5 +12,5 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties(prefix = "app.batch.parallel-writer")
 public class ParallelWriterProperties {
     @Positive(message = "pool-size must > 0")
-    private int poolSize;
+    private int threadPoolSize;
 }

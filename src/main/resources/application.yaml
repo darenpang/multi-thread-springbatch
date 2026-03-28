@@ -18,3 +18,5 @@ app:
       file-path: src/test/resources/data.csv
       file-encoding: UTF-8
       chunk-size: 5
+    parallel-writer:
+      pool-size: 4

@@ -47,7 +47,7 @@ class ParallelChunkWriteExecutorTest {
      * (高)(済) D.2 失敗あったら異常
      * (高)(済) D.3 失敗後は後続の新規スライドを submit しない
      * (高)(済) D.4 失敗あったら本当のcauseがでる
-     * (低) D.5 RejectedExecutionException確認
+     * (低)(済) D.5 RejectedExecutionException確認
      * (中)(済) D.6 複数異常は全部でる、primaryとsuppressedは分ける
      * * E. 中断と取消
      * (高)(済) E.1 Permitを待つときに中断
@@ -392,6 +392,26 @@ class ParallelChunkWriteExecutorTest {
                     }));
             assertThat(thrown).isInstanceOf(RuntimeException.class);
             assertThat(invokedPartitions.get()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    @DisplayName("[D.5] RejectedExecutionException 確認")
+    void D5_shouldWrapRejectedExecutionExceptionWhenSubmitIsRejected() {
+        try (Harness harness = newHarness(1)) {
+            harness.executor.destroy();
+
+            Throwable thrown = catchThrowable(() ->
+                    harness.target.execute(numbers(1), 1, partition -> {}));
+
+            assertThat(thrown)
+                    .isInstanceOf(RuntimeException.class)
+                    .hasMessageContaining("Parallel chunk write failed")
+                    .hasMessageContaining("submittedPartitionCount=0")
+                    .hasMessageContaining("failureCount=1")
+                    .hasCauseInstanceOf(RejectedExecutionException.class);
+            assertThat(thrown.getCause()).isInstanceOf(RejectedExecutionException.class);
+            assertThat(thrown.getSuppressed()).isEmpty();
         }
     }
 

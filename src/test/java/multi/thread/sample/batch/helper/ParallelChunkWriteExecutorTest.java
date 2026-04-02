@@ -9,10 +9,15 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.batch.support.transaction.ResourcelessTransactionManager;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -23,31 +28,31 @@ class ParallelChunkWriteExecutorTest {
     /**
      * テスト観点整理
      * * A. 入力
-     * (高) A.1 maxConcurrency不正　0 -1
-     * (高) A.2 items不正 empty
-     * (高) A.3 正常
+     * (高)(済) A.1 maxConcurrency不正　0 -1
+     * (高)(済) A.2 items不正 empty
+     * (高)(済) A.3 正常
      * * B. Partitionの切り方
-     * (高) B.1 items 10件　3並列
-     * (高) B.2 items 9件　3並列
-     * (高) B.3 items 2件　5並列
-     * (高) B.4 items 漏れ・重複なく処理される
+     * (高)(済) B.1 items 10件　3並列
+     * (高)(済) B.2 items 9件　3並列
+     * (高)(済) B.3 items 2件　5並列
+     * (高)(済) B.4 items 漏れ・重複なく処理される
      * (低) B.5 items 改ざんされない（Readonly）
      * * C. 並列コントロール
      * (高) C.1 並列上限超えない
      * (高) C.2 Semaphore により待機が発生する
-     * (高) C.3 maxConcurrency < thread-pool-size　の場合の並列数
-     * (高) C.4 maxConcurrency >= thread-pool-size　の場合の並列数
+     * (高)(済) C.3 maxConcurrency < thread-pool-size　の場合の並列数
+     * (高)(済)  C.4 maxConcurrency >= thread-pool-size　の場合の並列数
      * * D. コミットと失敗
-     * (高) D.1 全スライド成功時に execute は正常終了する
-     * (高) D.2 失敗あったら異常
-     * (高) D.3 失敗後は後続の新規スライドを submit しない
-     * (高) D.4 失敗あったら本当のcauseがでる
+     * (高)(済) D.1 全スライド成功時に execute は正常終了する
+     * (高)(済) D.2 失敗あったら異常
+     * (高)(済) D.3 失敗後は後続の新規スライドを submit しない
+     * (高)(済) D.4 失敗あったら本当のcauseがでる
      * (低) D.5 RejectedExecutionException確認
-     * (中) D.6 複数異常は全部でる、primaryとsuppressedは分ける
+     * (中)(済) D.6 複数異常は全部でる、primaryとsuppressedは分ける
      * * E. 中断と取消
-     * (高) E.1 Permitを待つときに中断
-     * (高) E.2 completionを待つときに中断
-     * (高) E.3 中断後interrupted flagが復元される
+     * (高)(済) E.1 Permitを待つときに中断
+     * (高)(済) E.2 completionを待つときに中断
+     * (高)(済) E.3 中断後interrupted flagが復元される
      * (高) E.4 CancellationException時の動作
      * (高) E.5 cancelRemainingの動作
      * * F. トランザクション
@@ -68,7 +73,7 @@ class ParallelChunkWriteExecutorTest {
     void A1_invalidMaxConcurrency(int maxConcurrency) {
         try (Harness harness = newHarness(2)) {
             Throwable thrown = catchThrowable(() ->
-                    harness.target.execute(List.of(1, 2, 3), maxConcurrency, partition -> {}));
+                    harness.target.execute(numbers(3), maxConcurrency, partition -> {}));
 
             assertThat(thrown)
                     .isInstanceOf(IllegalArgumentException.class)
@@ -100,9 +105,9 @@ class ParallelChunkWriteExecutorTest {
         );
     }
 
-    @ParameterizedTest(name = "[A.3][B] items={0}, maxConcurrency={1}, expectedPartitionSizes={2}")
+    @ParameterizedTest(name = "[A.3][B][D.1] items={0}, maxConcurrency={1}, expectedPartitionSizes={2}")
     @MethodSource("validPartition")
-    void A3_B1_B2_B3_B4_shouldActNormally(
+    void A3_B1_B2_B3_B4_D1_shouldActNormally(
             int itemCount,
             int maxConcurrency,
             List<Integer> expectedPartitionSizes
@@ -127,6 +132,15 @@ class ParallelChunkWriteExecutorTest {
             assertThat(observedPartitions)
                     .extracting(List::size)
                     .containsExactlyInAnyOrderElementsOf(expectedPartitionSizes);
+        }
+
+        // D1 execute正常
+        try (Harness harness = newHarness(2)) {
+            Throwable thrown = catchThrowable(() ->
+                    harness.target.execute(numbers(3), maxConcurrency, partition -> {}));
+
+            assertThat(thrown)
+                    .doesNotThrowAnyException();
         }
     }
 
@@ -191,7 +205,357 @@ class ParallelChunkWriteExecutorTest {
         }
     }
 
+
+    @Test
+    @DisplayName("[C.4] maxConcurrency >= thread-pool-size, 並列上限はthread-pool-sizeを超えない")
+    void C4_shouldNotExceedThreadPoolSizeWhenItIsLargerThanOrEqualToThreadPoolSize() {
+        // thread-pool-sizeが4のexecutorを作る
+        try (Harness harness = newHarness(4)) {
+            // カウントダウン（倒计时锁存器）。
+            // 指定の数字で初期化され、その数字分のcountDown()が呼ばれるまでawait()はブロックします。
+            CountDownLatch started = new CountDownLatch(2);
+            CountDownLatch released = new CountDownLatch(1);
+
+            // 実行中スレッド数
+            AtomicInteger inFlight = new AtomicInteger();
+            // 歴史最大スレッド数
+            AtomicInteger maxSeen = new AtomicInteger();
+
+            // メインスレッドをブロックしないように、新しいサブスレッド（caller）で処理させる
+            // >
+            try (ExecutorService caller = Executors.newSingleThreadExecutor()) {
+                try {
+                    Future<Integer> future = caller.submit(() ->
+                            harness.target.execute(numbers(8), 8, partition -> {
+                                started.countDown();
+
+                                int current = inFlight.incrementAndGet();
+                                maxSeen.accumulateAndGet(current, Math::max);
+
+                                try {
+                                    boolean ok = released.await(5, TimeUnit.SECONDS);
+                                    if (!ok) {
+                                        throw new RuntimeException("test timeout while waiting release");
+                                    }
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    throw new RuntimeException(e);
+                                } finally {
+                                    inFlight.decrementAndGet();
+                                }
+                            })
+                    );
+
+                    // True：TimeOutする前CountDownLatchが0になる。
+                    // False：TimeOutする前CountDownLatchが0にならない。
+                    assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+                    assertThat(maxSeen.get()).isLessThanOrEqualTo(4);
+
+                    released.countDown();
+
+                    assertThat(future.get(2, TimeUnit.SECONDS)).isEqualTo(8);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("test interrupted", e);
+                } catch (ExecutionException e) {
+                    throw new RuntimeException("async execution failed in test", e);
+                } catch (TimeoutException e) {
+                    throw new RuntimeException("test timed out", e);
+                } finally {
+                    caller.shutdown();
+                }
+            }
+
+
+            // =
+            try (ExecutorService caller = Executors.newSingleThreadExecutor()) {
+                try {
+                    Future<Integer> future = caller.submit(() ->
+                            harness.target.execute(numbers(8), 4, partition -> {
+                                started.countDown();
+
+                                int current = inFlight.incrementAndGet();
+                                maxSeen.accumulateAndGet(current, Math::max);
+
+                                try {
+                                    boolean ok = released.await(5, TimeUnit.SECONDS);
+                                    if (!ok) {
+                                        throw new RuntimeException("test timeout while waiting release");
+                                    }
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    throw new RuntimeException(e);
+                                } finally {
+                                    inFlight.decrementAndGet();
+                                }
+                            })
+                    );
+
+                    // True：TimeOutする前CountDownLatchが0になる。
+                    // False：TimeOutする前CountDownLatchが0にならない。
+                    assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+                    assertThat(maxSeen.get()).isLessThanOrEqualTo(4);
+
+                    released.countDown();
+
+                    assertThat(future.get(2, TimeUnit.SECONDS)).isEqualTo(8);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("test interrupted", e);
+                } catch (ExecutionException e) {
+                    throw new RuntimeException("async execution failed in test", e);
+                } catch (TimeoutException e) {
+                    throw new RuntimeException("test timed out", e);
+                } finally {
+                    caller.shutdown();
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("[D.2][D.4] 失敗したら異常、causeは見える")
+    void D2_D4_shouldThrowAndExposeRealCauseWhenOnePartitionFails() {
+        try (Harness harness = newHarness(2)) {
+            Throwable thrown = catchThrowable(() ->
+                    harness.target.execute(numbers(4), 2, partition -> {
+                        // 1が含まれた場合のみ異常
+                        if (partition.contains(1)) {
+                            throw new IllegalStateException("boom-1234567890");
+                        }
+                    })
+            );
+            assertThat(thrown.getCause())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("boom-1234567890");
+            assertThat(thrown)
+                    .isInstanceOf(RuntimeException.class)
+                    .hasMessageContaining("Parallel chunk write failed");
+        }
+    }
+
+    @Test
+    @DisplayName("[D.3] 失敗後は後続の新規スライドを submit しない")
+    void D3_shouldStopSubmittingNewPartitionsAfterFirstFailure() {
+        try (Harness harness = newHarness(1)) {
+            AtomicInteger invokedPartitions = new AtomicInteger();
+
+            Throwable thrown = catchThrowable(() ->
+                    harness.target.execute(numbers(8), 4, partition -> {
+                        invokedPartitions.incrementAndGet();
+                        if (partition.contains(1)) {
+                            throw new IllegalStateException("boom first partition 0987654321.");
+                        }
+                    }));
+            assertThat(thrown).isInstanceOf(RuntimeException.class);
+            assertThat(invokedPartitions.get()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    @DisplayName("[D.6] 複数異常は全部でる、primaryとsuppressedは分ける")
+    void D6_multiExceptionShouldThrow() {
+        try (Harness harness = newHarness(2)) {
+            CountDownLatch started = new CountDownLatch(2);
+            CountDownLatch release = new CountDownLatch(1);
+
+            // メインスレッドをブロックしないように、新しいサブスレッド（caller）で処理させる
+            try (ExecutorService caller = Executors.newSingleThreadExecutor()) {
+                try {
+                    Future<Integer> future = caller.submit(() ->
+                            harness.target.execute(numbers(4), 2, partition -> {
+                                started.countDown();
+
+                                try {
+                                    // 各partitionの処理開始を待ち合わせる
+                                    boolean ok = started.await(2, TimeUnit.SECONDS);
+                                    if (!ok) {
+                                        throw new RuntimeException("test timeout while waiting both partitions to start");
+                                    }
+
+                                    // サブスレッドのrelease指示を待つ
+                                    boolean released = release.await(2, TimeUnit.SECONDS);
+                                    if (!released) {
+                                        throw new RuntimeException("test timed out while waiting release");
+                                    }
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    throw new RuntimeException(e);
+                                }
+
+                                if (partition.contains(1)) {
+                                    throw new IllegalStateException("boom-12");
+                                } else {
+                                    throw new IllegalStateException("boom-34");
+                                }
+                            })
+                    );
+                    // 両方ともpartitionWriterに入っているかどうか
+                    assertThat(started.await(3, TimeUnit.SECONDS)).isTrue();
+                    // releaseして、異常出すロジックに入らせる
+                    release.countDown();
+
+                    Throwable thrown = catchThrowable(() -> future.get(2, TimeUnit.SECONDS));
+
+                    // future.getで出た異常はExecutionException
+                    assertThat(thrown).isInstanceOf(ExecutionException.class);
+                    // その中はParallelChunkWriteExecutorで組み込んだRuntimeException
+                    Throwable actual = thrown.getCause();
+                    assertThat(actual).isInstanceOf(RuntimeException.class);
+                    assertThat(actual.getCause()).isNotNull();
+
+                    List<String> messages = new ArrayList<>();
+                    messages.add(actual.getCause().getMessage());
+                    Arrays.stream(actual.getSuppressed())
+                            .map(Throwable::getMessage)
+                            .forEach(messages::add);
+
+                    assertThat(messages)
+                            .isNotEmpty()
+                            .containsAnyOf("boom-12", "boom-34")
+                            .allMatch(msg -> msg.equals("boom-12") || msg.equals("boom-34"))
+                            .doesNotHaveDuplicates();
+
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException(e);
+                } finally {
+                    caller.shutdown();
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("[E.1][E.3] Permitを待つときに中断")
+    void E1_E3_interruptedWhileWaitingPermit() {
+        try (Harness harness = newHarness(1)) {
+            CountDownLatch firstStarted = new CountDownLatch(1);
+            CountDownLatch releaseFirst = new CountDownLatch(1);
+
+            try (ExecutorService blocker = Executors.newSingleThreadExecutor()) {
+                Future<Integer> firstFuture = blocker.submit(() ->
+                        harness.target.execute(numbers(1), 1, partition -> {
+                            firstStarted.countDown();
+                            try {
+                                boolean ok = releaseFirst.await(5, TimeUnit.SECONDS);
+                                if (!ok) {
+                                    throw new RuntimeException("test timeout while waiting releaseFirst");
+                                }
+                            }  catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException(e);
+                            }
+                        })
+                );
+                assertThat(firstStarted.await(2, TimeUnit.SECONDS)).isTrue();
+
+                AtomicReference<Throwable> thrownRef = new AtomicReference<>();
+                AtomicBoolean interruptedFlagRef = new AtomicBoolean(false);
+
+                Thread waitingThread = new Thread(() -> {
+                    try {
+                        harness.target.execute(List.of(2, 3), 1, partition -> {});
+                    } catch (Throwable t) {
+                        thrownRef.set(t);
+                    }  finally {
+                        interruptedFlagRef.set(Thread.currentThread().isInterrupted());
+                    }
+                }, "permit-waiting-thread");
+
+                waitingThread.start();
+                awaitThreadState(waitingThread, Duration.ofSeconds(2), Thread.State.WAITING, Thread.State.TIMED_WAITING);
+
+                waitingThread.interrupt();
+                waitingThread.join(2000);
+
+                assertThat(thrownRef.get()).isInstanceOf(RuntimeException.class);
+                assertThat(thrownRef.get().getMessage()).contains("parallel writer slot");
+                assertThat(thrownRef.get().getCause()).isInstanceOf(InterruptedException.class);
+                assertThat(interruptedFlagRef.get()).isTrue();
+
+                releaseFirst.countDown();
+                firstFuture.get(2, TimeUnit.SECONDS);
+            } catch  (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            } catch (ExecutionException e) {
+                throw new RuntimeException("async execution failed in test", e);
+            } catch (TimeoutException e) {
+                throw new RuntimeException("test timed out", e);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("[E.2][E.3] completionを待つときに中断")
+    void E2_E3_interruptedWhileWaitingPermit() {
+        try (Harness harness = newHarness(2)) {
+            CountDownLatch started = new CountDownLatch(2);
+            CountDownLatch release = new CountDownLatch(1);
+
+            AtomicReference<Throwable> thrownRef = new AtomicReference<>();
+            AtomicBoolean interruptedFlagRef = new AtomicBoolean(false);
+
+            Thread callerThread = new Thread(() -> {
+                try {
+                    harness.target.execute(numbers(4), 2, partition -> {
+                        started.countDown();
+                        try {
+                            boolean ok = release.await(5, TimeUnit.SECONDS);
+                            if (!ok) {
+                                throw new RuntimeException("test timeout while waiting release");
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException(e);
+                        }
+                    });
+                } catch (Throwable t) {
+                    thrownRef.set(t);
+                } finally {
+                    interruptedFlagRef.set(Thread.currentThread().isInterrupted());
+                }
+            }, "completion-waiting-thread");
+
+            callerThread.start();
+            assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+            awaitThreadState(callerThread, Duration.ofSeconds(2), Thread.State.WAITING, Thread.State.TIMED_WAITING);
+
+            callerThread.interrupt();
+            callerThread.join(2000);
+
+            release.countDown();
+
+            assertThat(thrownRef.get()).isInstanceOf(RuntimeException.class);
+            assertThat(thrownRef.get().getMessage()).contains("parallel writer tasks");
+            assertThat(thrownRef.get().getCause()).isInstanceOf(InterruptedException.class);
+            assertThat(interruptedFlagRef.get()).isTrue();
+        } catch  (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(e);
+        }
+    }
+
+
     // ↓===== テストhelpers =====
+
+    private static void awaitThreadState(
+            Thread thread,
+            Duration timeout,
+            Thread.State... expectedStates
+    ) throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        List<Thread.State> expected = Arrays.asList(expectedStates);
+
+        while (System.nanoTime() < deadline) {
+            if (expected.contains(thread.getState())) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("thread did not enter expected states " + expected + ", actual=" +  thread.getState());
+    }
 
     // 　1~count分のListを一瞬で生成
     private static List<Integer> numbers(int count) {

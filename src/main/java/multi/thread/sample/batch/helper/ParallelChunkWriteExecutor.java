@@ -21,6 +21,7 @@ public class ParallelChunkWriteExecutor {
     private final ThreadPoolTaskExecutor executor;
     private final PlatformTransactionManager platformTransactionManager;
     private final Semaphore globalSemaphore;
+    private final int threadPoolSize;
 
     // Constructorで注入
     // ThreadPoolTaskExecutorは名前指定
@@ -31,6 +32,7 @@ public class ParallelChunkWriteExecutor {
         this.executor = executor;
         this.platformTransactionManager = platformTransactionManager;
         this.globalSemaphore = new Semaphore(parallelWriterProperties.getThreadPoolSize());
+        this.threadPoolSize = parallelWriterProperties.getThreadPoolSize();
     }
 
     public <T> int execute(
@@ -40,6 +42,8 @@ public class ParallelChunkWriteExecutor {
     ) {
         if (maxConcurrency <= 0) {
             throw new IllegalArgumentException("maxConcurrency must be greater than 0");
+        } else if (maxConcurrency > threadPoolSize) {
+            maxConcurrency = threadPoolSize;
         }
         if (items.isEmpty()) {
             return 0;

@@ -36,7 +36,7 @@ class ParallelChunkWriteExecutorTest {
      * (高)(済) B.2 items 9件　3並列
      * (高)(済) B.3 items 2件　5並列
      * (高)(済) B.4 items 漏れ・重複なく処理される
-     * (低) B.5 items 改ざんされない（Readonly）
+     * (低)(済) B.5 items 改ざんされない（Readonly）
      * * C. 並列コントロール
      * (高)(済) C.1 並列上限超えない
      * (高)(済) C.2 Semaphore により待機が発生する
@@ -141,6 +141,49 @@ class ParallelChunkWriteExecutorTest {
 
             assertThat(thrown)
                     .doesNotThrowAnyException();
+        }
+    }
+
+    @Test
+    @DisplayName("[B.5] items は改ざんされない（Readonly）")
+    void B5_itemsShouldBeReadonlyAndUseSnapshot() {
+        try (Harness harness = newHarness(2)) {
+            List<Integer> items = new ArrayList<>(numbers(4));
+            ConcurrentLinkedDeque<List<Integer>> observedPartitions = new ConcurrentLinkedDeque<>();
+            ConcurrentLinkedDeque<Boolean> readonlyChecks = new ConcurrentLinkedDeque<>();
+            CountDownLatch originalMutated = new CountDownLatch(1);
+
+            int result = harness.target.execute(items, 2, partition -> {
+                Throwable thrown = catchThrowable(() -> partition.add(999));
+                readonlyChecks.add(thrown instanceof UnsupportedOperationException);
+
+                if (partition.contains(1)) {
+                    items.clear();
+                    items.add(99);
+                    items.add(100);
+                    originalMutated.countDown();
+                } else {
+                    try {
+                        boolean ok = originalMutated.await(2, TimeUnit.SECONDS);
+                        if (!ok) {
+                            throw new RuntimeException("test timeout while waiting original items mutation");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException(e);
+                    }
+                }
+
+                observedPartitions.add(List.copyOf(partition));
+            });
+
+            assertThat(result).isEqualTo(4);
+            assertThat(observedPartitions)
+                    .containsExactlyInAnyOrder(List.of(1, 2), List.of(3, 4));
+            assertThat(readonlyChecks)
+                    .hasSize(2)
+                    .containsOnly(true);
+            assertThat(items).containsExactly(99, 100);
         }
     }
 

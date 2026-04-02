@@ -11,8 +11,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -131,6 +130,66 @@ class ParallelChunkWriteExecutorTest {
         }
     }
 
+    @Test
+    @DisplayName("[C.3] maxConcurrency < thread-pool-size, 並列上限はmaxConcurrencyを超えない")
+    void C3_shouldNotExceedMaxConcurrencyWhenItIsLowerThanThreadPoolSize() {
+        // thread-pool-sizeが4のexecutorを作る
+        try (Harness harness = newHarness(4)) {
+            // カウントダウン（倒计时锁存器）。
+            // 指定の数字で初期化され、その数字分のcountDown()が呼ばれるまでawait()はブロックします。
+            CountDownLatch started = new CountDownLatch(2);
+            CountDownLatch released = new CountDownLatch(1);
+
+            // 実行中スレッド数
+            AtomicInteger inFlight = new AtomicInteger();
+            // 歴史最大スレッド数
+            AtomicInteger maxSeen = new AtomicInteger();
+
+            // メインスレッドをブロックしないように、新しいサブスレッド（caller）で処理させる
+            try (ExecutorService caller = Executors.newSingleThreadExecutor()) {
+                try {
+                    Future<Integer> future = caller.submit(() ->
+                            harness.target.execute(numbers(8), 2, partition -> {
+                                started.countDown();
+
+                                int current = inFlight.incrementAndGet();
+                                maxSeen.accumulateAndGet(current, Math::max);
+
+                                try {
+                                    boolean ok = released.await(5, TimeUnit.SECONDS);
+                                    if (!ok) {
+                                        throw new RuntimeException("test timeout while waiting release");
+                                    }
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                    throw new RuntimeException(e);
+                                } finally {
+                                    inFlight.decrementAndGet();
+                                }
+                            })
+                    );
+
+                    // True：TimeOutする前CountDownLatchが0になる。
+                    // False：TimeOutする前CountDownLatchが0にならない。
+                    assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+                    assertThat(maxSeen.get()).isLessThanOrEqualTo(2);
+
+                    released.countDown();
+
+                    assertThat(future.get(2, TimeUnit.SECONDS)).isEqualTo(8);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("test interrupted", e);
+                } catch (ExecutionException e) {
+                    throw new RuntimeException("async execution failed in test", e);
+                } catch (TimeoutException e) {
+                    throw new RuntimeException("test timed out", e);
+                } finally {
+                    caller.shutdown();
+                }
+            }
+        }
+    }
 
     // ↓===== テストhelpers =====
 

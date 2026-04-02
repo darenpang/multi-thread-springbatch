@@ -38,8 +38,8 @@ class ParallelChunkWriteExecutorTest {
      * (高)(済) B.4 items 漏れ・重複なく処理される
      * (低) B.5 items 改ざんされない（Readonly）
      * * C. 並列コントロール
-     * (高) C.1 並列上限超えない
-     * (高) C.2 Semaphore により待機が発生する
+     * (高)(済) C.1 並列上限超えない
+     * (高)(済) C.2 Semaphore により待機が発生する
      * (高)(済) C.3 maxConcurrency < thread-pool-size　の場合の並列数
      * (高)(済)  C.4 maxConcurrency >= thread-pool-size　の場合の並列数
      * * D. コミットと失敗
@@ -145,8 +145,8 @@ class ParallelChunkWriteExecutorTest {
     }
 
     @Test
-    @DisplayName("[C.3] maxConcurrency < thread-pool-size, 並列上限はmaxConcurrencyを超えない")
-    void C3_shouldNotExceedMaxConcurrencyWhenItIsLowerThanThreadPoolSize() {
+    @DisplayName("[C.1][C.3] maxConcurrency < thread-pool-size, 並列上限はmaxConcurrencyを超えない")
+    void C1_C3_shouldNotExceedMaxConcurrencyWhenItIsLowerThanThreadPoolSize() {
         // thread-pool-sizeが4のexecutorを作る
         try (Harness harness = newHarness(4)) {
             // カウントダウン（倒计时锁存器）。
@@ -207,8 +207,8 @@ class ParallelChunkWriteExecutorTest {
 
 
     @Test
-    @DisplayName("[C.4] maxConcurrency >= thread-pool-size, 並列上限はthread-pool-sizeを超えない")
-    void C4_shouldNotExceedThreadPoolSizeWhenItIsLargerThanOrEqualToThreadPoolSize() {
+    @DisplayName("[C.1][C.4] maxConcurrency >= thread-pool-size, 並列上限はthread-pool-sizeを超えない")
+    void C1_C4_shouldNotExceedThreadPoolSizeWhenItIsLargerThanOrEqualToThreadPoolSize() {
         // thread-pool-sizeが4のexecutorを作る
         try (Harness harness = newHarness(4)) {
             // カウントダウン（倒计时锁存器）。
@@ -427,8 +427,8 @@ class ParallelChunkWriteExecutorTest {
     }
 
     @Test
-    @DisplayName("[E.1][E.3] Permitを待つときに中断")
-    void E1_E3_interruptedWhileWaitingPermit() {
+    @DisplayName("[C.2][E.1][E.3] Permitを待つときに中断")
+    void C2_E1_E3_interruptedWhileWaitingPermit() {
         try (Harness harness = newHarness(1)) {
             CountDownLatch firstStarted = new CountDownLatch(1);
             CountDownLatch releaseFirst = new CountDownLatch(1);

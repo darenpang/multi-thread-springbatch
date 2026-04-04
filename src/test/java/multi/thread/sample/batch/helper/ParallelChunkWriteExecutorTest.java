@@ -2,11 +2,11 @@ package multi.thread.sample.batch.helper;
 
 import multi.thread.sample.batch.config.ParallelWriterProperties;
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.MockedConstruction;
 import org.springframework.batch.support.transaction.ResourcelessTransactionManager;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
@@ -24,6 +24,8 @@ import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.ThrowableAssert.catchThrowable;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
 
 class ParallelChunkWriteExecutorTest {
     /**
@@ -54,7 +56,7 @@ class ParallelChunkWriteExecutorTest {
      * (高)(済) E.1 Permitを待つときに中断
      * (高)(済) E.2 completionを待つときに中断
      * (高)(済) E.3 中断後interrupted flagが復元される
-     * (高) E.4 CancellationException時の動作
+     * (高)(済) E.4 CancellationException時の動作
      * (高)(済) E.5 cancelRemainingの動作
      * * F. トランザクション
      * (低) F.1 独立なトランザクションになる
@@ -598,6 +600,47 @@ class ParallelChunkWriteExecutorTest {
         } catch  (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    @DisplayName("[E.4] CancellationException 時の動作")
+    void E4_shouldWrapUnexpectedCancellationException() throws Exception {
+        try (Harness harness = newHarness(1)) {
+            @SuppressWarnings({"unchecked"})
+            Future<Integer> cancelledFuture = mock(Future.class);
+
+            when(cancelledFuture.get()).thenThrow(new CancellationException("cancelled-unexpected-123"));
+            when(cancelledFuture.isDone()).thenReturn(false);
+
+            try (
+                    @SuppressWarnings({"rawtypes", "unchecked"})
+                    MockedConstruction<ExecutorCompletionService> mocked = mockConstruction(
+                    ExecutorCompletionService.class,
+                    (mock, context) -> {
+                        when(mock.submit(any(Callable.class))).thenReturn(cancelledFuture);
+                        when(mock.take()).thenReturn(cancelledFuture);
+                    })) {
+                AtomicInteger invokedPartitions = new AtomicInteger();
+
+                Throwable thrown = catchThrowable(() ->
+                        harness.target.execute(numbers(1), 1, partition -> invokedPartitions.incrementAndGet()));
+
+                assertThat(mocked.constructed()).hasSize(1);
+                assertThat(invokedPartitions.get()).isZero();
+                assertThat(thrown)
+                        .isInstanceOf(RuntimeException.class)
+                        .hasMessageContaining("Parallel chunk write failed")
+                        .hasMessageContaining("submittedPartitionCount=1")
+                        .hasMessageContaining("failureCount=1");
+                assertThat(thrown.getCause())
+                        .isInstanceOf(RuntimeException.class)
+                        .hasMessageContaining("A partition future was cancelled unexpectedly");
+                assertThat(thrown.getCause().getCause())
+                        .isInstanceOf(CancellationException.class)
+                        .hasMessageContaining("cancelled-unexpected-123");
+                verify(cancelledFuture).cancel(true);
+            }
         }
     }
 

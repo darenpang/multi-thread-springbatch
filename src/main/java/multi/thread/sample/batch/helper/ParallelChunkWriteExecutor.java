@@ -31,8 +31,8 @@ public class ParallelChunkWriteExecutor {
             ParallelWriterProperties   parallelWriterProperties) {
         this.executor = executor;
         this.platformTransactionManager = platformTransactionManager;
-        this.globalSemaphore = new Semaphore(parallelWriterProperties.getThreadPoolSize());
         this.threadPoolSize = parallelWriterProperties.getThreadPoolSize();
+        this.globalSemaphore = new Semaphore(threadPoolSize);
     }
 
     public <T> int execute(

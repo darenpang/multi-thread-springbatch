@@ -2,6 +2,7 @@ package multi.thread.sample.batch.helper;
 
 import multi.thread.sample.batch.config.ParallelWriterProperties;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -54,7 +55,7 @@ class ParallelChunkWriteExecutorTest {
      * (高)(済) E.2 completionを待つときに中断
      * (高)(済) E.3 中断後interrupted flagが復元される
      * (高) E.4 CancellationException時の動作
-     * (高) E.5 cancelRemainingの動作
+     * (高)(済) E.5 cancelRemainingの動作
      * * F. トランザクション
      * (低) F.1 独立なトランザクションになる
      * (低) F.2 一つのトランザクション失敗になってもほかのトランザクションが成功できる
@@ -597,6 +598,64 @@ class ParallelChunkWriteExecutorTest {
         } catch  (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    @DisplayName("[E.5] cancelRemaining は未完了のpartition を cancel する")
+    void E5_shouldCancelRemainingPartitionsAfterFailure() {
+        try (Harness harness = newHarness(2)) {
+            CountDownLatch started = new CountDownLatch(2);
+            CountDownLatch canceledPartitionInterrupted = new CountDownLatch(1);
+            CountDownLatch blocker = new CountDownLatch(1);
+
+            AtomicBoolean cancelObserved = new AtomicBoolean(false);
+
+            try (ExecutorService caller = Executors.newSingleThreadExecutor()) {
+                Future<Integer> future = caller.submit(() ->
+                        harness.target.execute(numbers(4), 2, partition -> {
+                            started.countDown();
+
+                            try {
+                                boolean ok = started.await(2, TimeUnit.SECONDS);
+                                if (!ok) {
+                                    throw new RuntimeException("test timeout while waiting both partitions to start");
+                                }
+
+                                if (partition.contains(1)) {
+                                    throw new IllegalStateException("boom-cancel-remaining");
+                                }
+
+                                boolean released = blocker.await(5, TimeUnit.SECONDS);
+                                if (!released) {
+                                    throw new RuntimeException("test timeout while waiting cancellation");
+                                }
+                            } catch (InterruptedException e) {
+                                cancelObserved.set(true);
+                                canceledPartitionInterrupted.countDown();
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException(e);
+                            }
+                        })
+                );
+
+                assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+                assertThat(canceledPartitionInterrupted.await(5, TimeUnit.SECONDS)).isTrue();
+
+                Throwable thrown = catchThrowable(() -> future.get(2, TimeUnit.SECONDS));
+
+                assertThat(thrown).isInstanceOf(ExecutionException.class);
+                assertThat(thrown.getCause())
+                        .isInstanceOf(RuntimeException.class)
+                        .hasMessageContaining("Parallel chunk write failed");
+                assertThat(thrown.getCause().getCause())
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("boom-cancel-remaining");
+                assertThat(cancelObserved.get()).isTrue();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
         }
     }
 

@@ -53,6 +53,8 @@ class ParallelChunkWriteExecutorTest {
      * (高)(済) D.4 失敗あったら本当のcauseがでる
      * (低)(済) D.5 RejectedExecutionException確認
      * (中)(済) D.6 複数異常は全部でる、primaryとsuppressedは分ける
+     * (中)(済) D.7 submit loop冒頭でfirstFailure検知したら中止
+     * (中)(済) D.8 permit取得直後でfirstFailure検知したらpermit解放して中止
      * * E. 中断と取消
      * (高)(済) E.1 Permitを待つときに中断
      * (高)(済) E.2 completionを待つときに中断
@@ -714,6 +716,121 @@ class ParallelChunkWriteExecutorTest {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(e);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("[D.7] submit loop冒頭でfirstFailure検知したら中止")
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void D7_shouldBreakBeforeAcquireWhenFirstFailureAlreadyExists() throws Exception {
+        try (Harness harness = newHarness(2)) {
+            @SuppressWarnings("unchecked")
+            Future<Integer> failedFuture = mock(Future.class);
+            AtomicReference<Throwable> failureRef = new AtomicReference<>();
+            AtomicInteger submitCalls = new AtomicInteger();
+            AtomicInteger invokedPartitions = new AtomicInteger();
+
+            when(failedFuture.get()).thenAnswer(invocation -> {
+                throw new ExecutionException(failureRef.get());
+            });
+            when(failedFuture.isDone()).thenReturn(true);
+
+            try (
+                    @SuppressWarnings({"rawtypes", "unchecked"})
+                    MockedConstruction<ExecutorCompletionService> mocked = mockConstruction(
+                    ExecutorCompletionService.class,
+                    (mock, context) -> {
+                        when(mock.submit(any(Callable.class))).thenAnswer(invocation -> {
+                            submitCalls.incrementAndGet();
+
+                            Callable<Integer> callable = invocation.getArgument(0);
+                            try {
+                                callable.call();
+                            } catch (Throwable t) {
+                                failureRef.set(t);
+                            }
+                            return failedFuture;
+                        });
+                        when(mock.take()).thenReturn(failedFuture);
+                    })) {
+                Throwable thrown = catchThrowable(() ->
+                        harness.target.execute(numbers(4), 2, partition -> {
+                            invokedPartitions.incrementAndGet();
+                            throw new IllegalStateException("boom-before-acquire");
+                        }));
+
+                assertThat(mocked.constructed()).hasSize(1);
+                assertThat(submitCalls.get()).isEqualTo(1);
+                assertThat(invokedPartitions.get()).isEqualTo(1);
+                assertThat(thrown)
+                        .isInstanceOf(RuntimeException.class)
+                        .hasMessageContaining("Parallel chunk write failed");
+                assertThat(thrown.getCause())
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("boom-before-acquire");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("[D.8] permit取得直後でfirstFailure検知したらpermit解放して中止")
+    void D8_shouldReleasePermitAndBreakWhenFailureDetectedAfterAcquire() {
+        try (Harness harness = newHarness(2)) {
+            CountDownLatch blockerStarted = new CountDownLatch(1);
+            CountDownLatch releaseBlocker = new CountDownLatch(1);
+            AtomicInteger invokedPartitions = new AtomicInteger();
+
+            try (
+                    ExecutorService blockerCaller = Executors.newSingleThreadExecutor();
+                    ExecutorService caller = Executors.newSingleThreadExecutor()
+            ) {
+                Future<Integer> blockerFuture = blockerCaller.submit(() ->
+                        harness.target.execute(numbers(1), 1, partition -> {
+                            blockerStarted.countDown();
+                            try {
+                                boolean ok = releaseBlocker.await(5, TimeUnit.SECONDS);
+                                if (!ok) {
+                                    throw new RuntimeException("test timeout while waiting releaseBlocker");
+                                }
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException(e);
+                            }
+                        })
+                );
+
+                assertThat(blockerStarted.await(2, TimeUnit.SECONDS)).isTrue();
+
+                Future<Integer> future = caller.submit(() ->
+                        harness.target.execute(numbers(4), 2, partition -> {
+                            invokedPartitions.incrementAndGet();
+                            if (partition.contains(1)) {
+                                throw new IllegalStateException("boom-after-acquire");
+                            }
+                        })
+                );
+
+                Throwable thrown = catchThrowable(() -> future.get(2, TimeUnit.SECONDS));
+
+                assertThat(thrown).isInstanceOf(ExecutionException.class);
+                assertThat(thrown.getCause())
+                        .isInstanceOf(RuntimeException.class)
+                        .hasMessageContaining("Parallel chunk write failed");
+                assertThat(thrown.getCause().getCause())
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("boom-after-acquire");
+                assertThat(invokedPartitions.get()).isEqualTo(1);
+
+                releaseBlocker.countDown();
+                assertThat(blockerFuture.get(2, TimeUnit.SECONDS)).isEqualTo(1);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            } catch (ExecutionException e) {
+                throw new RuntimeException("async execution failed in test", e);
+            } catch (TimeoutException e) {
+                throw new RuntimeException("test timed out", e);
             }
         }
     }

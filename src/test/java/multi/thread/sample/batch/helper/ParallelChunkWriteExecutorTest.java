@@ -33,7 +33,8 @@ class ParallelChunkWriteExecutorTest {
      * * A. 入力
      * (高)(済) A.1 maxConcurrency不正　0 -1
      * (高)(済) A.2 items不正 empty
-     * (高)(済) A.3 正常
+     * (高)(済) A.3 items、partitionWriterがnull
+     * (高)(済) A.4 正常
      * * B. Partitionの切り方
      * (高)(済) B.1 items 10件　3並列
      * (高)(済) B.2 items 9件　3並列
@@ -100,6 +101,21 @@ class ParallelChunkWriteExecutorTest {
         }
     }
 
+    @Test
+    @DisplayName("[A.3] items、partitionWriterがnull")
+    void A3_itemsAndPartitionWriterEmpty() {
+        try (Harness harness = newHarness(1)) {
+            Throwable thrownItems = catchThrowable(() ->
+                    harness.target.execute(null, 1, partition -> {}));
+            assertThat(thrownItems).isInstanceOf(NullPointerException.class);
+
+
+            Throwable thrownPartitionWriter = catchThrowable(() ->
+                    harness.target.execute(numbers(1), 1, null));
+            assertThat(thrownPartitionWriter).isInstanceOf(NullPointerException.class);
+        }
+    }
+
     static Stream<Arguments> validPartition() {
         return Stream.of(
                 Arguments.of(10, 3, List.of(4, 3, 3)),
@@ -108,9 +124,9 @@ class ParallelChunkWriteExecutorTest {
         );
     }
 
-    @ParameterizedTest(name = "[A.3][B][D.1] items={0}, maxConcurrency={1}, expectedPartitionSizes={2}")
+    @ParameterizedTest(name = "[A.4][B][D.1] items={0}, maxConcurrency={1}, expectedPartitionSizes={2}")
     @MethodSource("validPartition")
-    void A3_B1_B2_B3_B4_D1_shouldActNormally(
+    void A4_B1_B2_B3_B4_D1_shouldActNormally(
             int itemCount,
             int maxConcurrency,
             List<Integer> expectedPartitionSizes

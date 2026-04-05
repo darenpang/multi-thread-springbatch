@@ -110,7 +110,7 @@ public class ParallelChunkWriteExecutor {
                         submittedCount, partitionCount, threadPoolSize, e);
                 globalSemaphore.release();
                 failures.add(e);
-                firstFailure.compareAndSet(null, e);
+                recordFirstFailure(firstFailure, e, "submit->rejected");
                 cancelRemaining(submittedFutures);
                 break;
             }
@@ -132,17 +132,13 @@ public class ParallelChunkWriteExecutor {
                 if (firstFailure.get() == null) {
                     log.warn("ParallelChunkWriteExecutor got unexpected CancellationException");
                     failures.add(new RuntimeException("A partition future was cancelled unexpectedly", e));
-                    firstFailure.compareAndSet(null, e);
+                    recordFirstFailure(firstFailure, e, "completion->cancelled");
                     cancelRemaining(submittedFutures);
                 }
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e.getCause());
                 failures.add(cause);
-                if (firstFailure.compareAndSet(null, cause)) {
-                    // 初回失敗時のみログを出力
-                    log.warn("ParallelChunkWriteExecutor first failure: submittedCount={}, totalPartitions={}",
-                            submittedCount, partitionCount, cause);
-                }
+                recordFirstFailure(firstFailure, cause, "completion->executionExcept");
                 cancelRemaining(submittedFutures);
             }
         }
@@ -217,7 +213,8 @@ public class ParallelChunkWriteExecutor {
 
             return result == null ? 0 : result;
         } catch (RuntimeException e) {
-            firstFailure.compareAndSet(null, unwrap(e));
+            Throwable cause = unwrap(e);
+            recordFirstFailure(firstFailure, cause, "writeOnePartition->runtimeException");
             throw e;
         }
     }
@@ -278,5 +275,14 @@ public class ParallelChunkWriteExecutor {
             from = to;
         }
         return partitions;
+    }
+
+    // 初めの異常を設定・ログ出力
+    private void recordFirstFailure(AtomicReference<Throwable> firstFailure, Throwable cause, String phase) {
+        Throwable actual = (cause != null) ? cause : new IllegalStateException("first failure cause was null");
+
+        if (firstFailure.compareAndSet(null, actual)) {
+            log.warn("ParallelChunkWriteExecutor first failure at {}", phase, actual);
+        }
     }
 }

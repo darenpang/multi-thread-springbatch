@@ -194,7 +194,9 @@ class ParallelChunkWriteExecutorAdditionalCoverageTest {
     void G7_shouldCoverHelperBranches() {
         try (Harness harness = newHarness(1)) {
             IllegalStateException primary = new IllegalStateException("primary-helper");
+            IllegalArgumentException secondary = new IllegalArgumentException("secondary-helper");
             ExecutionException noCause = new ExecutionException("no-cause-helper", null);
+            AtomicReference<Throwable> recordedFailure = new AtomicReference<>();
 
             Throwable unwrappedCompletion = invokeUnwrap(
                     harness.target,
@@ -208,6 +210,19 @@ class ParallelChunkWriteExecutorAdditionalCoverageTest {
                     List.of(primary, primary),
                     2
             );
+            RuntimeException aggregatedWithSuppressed = invokeBuildAggregatedException(
+                    harness.target,
+                    List.of(primary, secondary),
+                    2
+            );
+            invokePrivate(
+                    harness.target,
+                    "recordFirstFailure",
+                    new Class<?>[]{AtomicReference.class, Throwable.class, String.class},
+                    recordedFailure,
+                    null,
+                    "helper-null-cause"
+            );
 
             assertThat(unwrappedCompletion).isSameAs(primary);
             assertThat(unwrappedNoCause).isSameAs(noCause);
@@ -217,6 +232,13 @@ class ParallelChunkWriteExecutorAdditionalCoverageTest {
             assertThat(aggregated)
                     .hasMessageContaining("submittedPartitionCount=2")
                     .hasMessageContaining("failureCount=2");
+            assertThat(aggregatedWithSuppressed.getCause()).isSameAs(primary);
+            assertThat(aggregatedWithSuppressed.getSuppressed())
+                    .hasSize(1)
+                    .containsExactly(secondary);
+            assertThat(recordedFailure.get())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("first failure cause was null");
         }
     }
 

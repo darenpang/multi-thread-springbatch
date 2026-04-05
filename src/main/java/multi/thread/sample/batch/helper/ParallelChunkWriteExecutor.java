@@ -1,6 +1,7 @@
 package multi.thread.sample.batch.helper;
 
 import lombok.NonNull;
+import lombok.extern.slf4j.Slf4j;
 import multi.thread.sample.batch.config.ParallelWriterProperties;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
@@ -16,6 +17,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+@Slf4j
 @Component
 public class ParallelChunkWriteExecutor {
     private final ThreadPoolTaskExecutor executor;
@@ -42,17 +44,23 @@ public class ParallelChunkWriteExecutor {
     ) {
         if (maxConcurrency <= 0) {
             throw new IllegalArgumentException("maxConcurrency must be greater than 0");
-        } else if (maxConcurrency > threadPoolSize) {
-            maxConcurrency = threadPoolSize;
         }
+        // threadPoolSizeより大きいmaxConcurrencyは意味ないので、小さいほうを使用
+        int effectiveConcurrency = Math.min(maxConcurrency, threadPoolSize);
         if (items.isEmpty()) {
             return 0;
         }
 
         // 内部処理用データをreadonly にする
         List<T> copiedItems = List.copyOf(items);
-        // 渡された件数はmaxConcurrencyより小さいなら、maxConcurrency分の並行処理数は意味ないから
-        int partitionCount = Math.min(copiedItems.size(), maxConcurrency);
+        // 渡された件数はeffectiveConcurrencyより小さいなら、effectiveConcurrency分の並行処理数は意味ないから
+        int partitionCount = Math.min(copiedItems.size(), effectiveConcurrency);
+
+        // debug log
+        log.debug("ParallelChunkWriteExecutor start: itemCount={}, requestedMaxConcurrency={}, effectiveConcurrency={}, threadPoolSize={}, partitionCount={}",
+                items.size(), maxConcurrency, effectiveConcurrency, threadPoolSize, partitionCount);
+
+        // 算出されたpartitionCountで入力データを分割
         List<List<T>> partitions = partitionEvenly(copiedItems, partitionCount);
 
         // 異常出たら後ろの処理スレッドを出しても意味ないので、異常発生したかどうかを管理。
@@ -98,6 +106,8 @@ public class ParallelChunkWriteExecutor {
             } catch (RejectedExecutionException e) {
                 // 理論上は発生しない。executorとsemaphoreは違う状態機械なので念のため、、、
                 // completionService.submitもし拒否されたらここでrelease
+                log.warn("ParallelChunkWriteExecutor submit rejected: submittedCount={}, partitionCount={}, threadPoolSize={}",
+                        submittedCount, partitionCount, threadPoolSize, e);
                 globalSemaphore.release();
                 failures.add(e);
                 firstFailure.compareAndSet(null, e);
@@ -113,11 +123,14 @@ public class ParallelChunkWriteExecutor {
                 Future<Integer> completed = completionService.take();
                 totalWritten += completed.get();
             } catch (InterruptedException e) {
+                log.warn("ParallelChunkWriteExecutor interrupted while waiting for completed futures: submittedCount={}",
+                        submittedCount, e);
                 cancelRemaining(submittedFutures);
                 Thread.currentThread().interrupt();
                 throw new RuntimeException("Interrupted while waiting for parallel writer tasks", e);
             } catch (CancellationException e) {
                 if (firstFailure.get() == null) {
+                    log.warn("ParallelChunkWriteExecutor got unexpected CancellationException");
                     failures.add(new RuntimeException("A partition future was cancelled unexpectedly", e));
                     firstFailure.compareAndSet(null, e);
                     cancelRemaining(submittedFutures);
@@ -125,15 +138,23 @@ public class ParallelChunkWriteExecutor {
             } catch (ExecutionException e) {
                 Throwable cause = unwrap(e.getCause());
                 failures.add(cause);
-                firstFailure.compareAndSet(null, cause);
+                if (firstFailure.compareAndSet(null, cause)) {
+                    // 初回失敗時のみログを出力
+                    log.warn("ParallelChunkWriteExecutor first failure: submittedCount={}, totalPartitions={}",
+                            submittedCount, partitionCount, cause);
+                }
                 cancelRemaining(submittedFutures);
             }
         }
 
         if (!failures.isEmpty()) {
+            log.warn("ParallelChunkWriteExecutor failed: submittedCount={}, failureCount={}",
+                    submittedCount, failures.size());
             throw buildAggregatedException(failures,  submittedCount);
         }
 
+        log.debug("ParallelChunkWriteExecutor finished successfully: submittedCount={}, totalWritten={}",
+                submittedCount, totalWritten);
         return totalWritten;
     }
 
@@ -221,6 +242,7 @@ public class ParallelChunkWriteExecutor {
             // 利用可能なスレッドを取る
             globalSemaphore.acquire();
         } catch (InterruptedException e) {
+            log.warn("ParallelChunkWriteExecutor interrupted while waiting for permit", e);
             // 中断されたら残り分のcancelを試みる
             cancelRemaining(submittedFutures);
             // restore a thread's interrupted status

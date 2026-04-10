@@ -160,8 +160,7 @@ class ParallelChunkWriteExecutorTest {
             Throwable thrown = catchThrowable(() ->
                     harness.target.execute(numbers(3), maxConcurrency, partition -> {}));
 
-            assertThat(thrown)
-                    .doesNotThrowAnyException();
+            assertThat(thrown).isNull();
         }
     }
 
@@ -332,17 +331,21 @@ class ParallelChunkWriteExecutorTest {
 
 
             // =
+            CountDownLatch started2 = new CountDownLatch(2);
+            CountDownLatch released2 = new CountDownLatch(1);
+            AtomicInteger inFlight2 = new AtomicInteger();
+            AtomicInteger maxSeen2 = new AtomicInteger();
             try (ExecutorService caller = Executors.newSingleThreadExecutor()) {
                 try {
                     Future<Integer> future = caller.submit(() ->
                             harness.target.execute(numbers(8), 4, partition -> {
-                                started.countDown();
+                                started2.countDown();
 
-                                int current = inFlight.incrementAndGet();
-                                maxSeen.accumulateAndGet(current, Math::max);
+                                int current = inFlight2.incrementAndGet();
+                                maxSeen2.accumulateAndGet(current, Math::max);
 
                                 try {
-                                    boolean ok = released.await(5, TimeUnit.SECONDS);
+                                    boolean ok = released2.await(5, TimeUnit.SECONDS);
                                     if (!ok) {
                                         throw new RuntimeException("test timeout while waiting release");
                                     }
@@ -350,17 +353,17 @@ class ParallelChunkWriteExecutorTest {
                                     Thread.currentThread().interrupt();
                                     throw new RuntimeException(e);
                                 } finally {
-                                    inFlight.decrementAndGet();
+                                    inFlight2.decrementAndGet();
                                 }
                             })
                     );
 
                     // True：TimeOutする前CountDownLatchが0になる。
                     // False：TimeOutする前CountDownLatchが0にならない。
-                    assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
-                    assertThat(maxSeen.get()).isLessThanOrEqualTo(4);
+                    assertThat(started2.await(2, TimeUnit.SECONDS)).isTrue();
+                    assertThat(maxSeen2.get()).isLessThanOrEqualTo(4);
 
-                    released.countDown();
+                    released2.countDown();
 
                     assertThat(future.get(2, TimeUnit.SECONDS)).isEqualTo(8);
                 } catch (InterruptedException e) {

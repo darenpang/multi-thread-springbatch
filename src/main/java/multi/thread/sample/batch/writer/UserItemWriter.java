@@ -29,13 +29,17 @@ public class UserItemWriter implements ItemWriter<UserBatchItem> {
 			return;
 		}
 
-		int written = executor.execute(
-				chunk.getItems(),
-				maxConcurrency,
-				this::writePartition
-		);
-		log.info("inserted {} users (maxConcurrency={})", written, maxConcurrency);
-
+		try {
+			int written = executor.execute(
+					chunk.getItems(),
+					maxConcurrency,
+					this::writePartition
+			);
+			log.info("inserted {} users (maxConcurrency={})", written, maxConcurrency);
+		} catch (RuntimeException e) {
+			log.error("UserItemWriter failed: itemCount={}, maxConcurrency={}", chunk.size(), maxConcurrency, e);
+			throw e;
+		}
 	}
 
 	private void writePartition(List<UserBatchItem> items) {
